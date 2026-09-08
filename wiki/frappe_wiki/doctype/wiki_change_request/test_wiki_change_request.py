@@ -1014,6 +1014,44 @@ class TestWikiChangeRequest(FrappeTestCase):
 		self.assertNotEqual(kept_cr.status, "Archived")
 		self.assertEqual(kept_cr.outdated, 1)
 
+	def test_approved_cr_is_resumed_not_orphaned(self):
+		"""A CR left Approved (e.g. the merge step of a self-serve save dropped)
+		must be picked back up on the next call instead of silently starting a
+		new Draft and orphaning it."""
+		space = create_test_wiki_space()
+		create_test_wiki_document(space.root_group, title="Page A")
+		cr = self._cr_with_change(space, "CR Approved Not Merged")
+		submit_change_request(cr.name)
+		approve_change_request(cr.name)
+
+		result = get_or_create_draft_change_request(space.name)
+
+		self.assertEqual(result.get("name"), cr.name)
+		self.assertEqual(result.get("status"), "Approved")
+		# No second CR should have been created for this user/space.
+		all_crs = frappe.get_all(
+			"Wiki Change Request",
+			filters={"wiki_space": space.name, "owner": frappe.session.user},
+		)
+		self.assertEqual(len(all_crs), 1)
+
+	def test_in_review_cr_is_resumed_over_a_newer_draft(self):
+		"""An in-flight In Review CR takes priority over a Draft/Changes Requested
+		one for the same user/space — it's the interrupted save that needs
+		finishing, not a fresh start."""
+		space = create_test_wiki_space()
+		create_test_wiki_document(space.root_group, title="Page A")
+		in_review_cr = self._cr_with_change(space, "CR In Review")
+		submit_change_request(in_review_cr.name)
+
+		# A newer Draft for the same space/user, created after the In Review one.
+		self._cr_with_change(space, "CR Newer Draft")
+
+		result = get_or_create_draft_change_request(space.name)
+
+		self.assertEqual(result.get("name"), in_review_cr.name)
+		self.assertEqual(result.get("status"), "In Review")
+
 	def test_archive_change_request_sets_status(self):
 		space = create_test_wiki_space()
 		create_test_wiki_document(space.root_group, title="Page A")

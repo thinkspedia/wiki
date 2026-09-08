@@ -533,7 +533,10 @@ def get_or_create_draft_change_request(wiki_space: str, title: str | None = None
 
 	cr = _find_existing_draft(wiki_space)
 	if cr:
-		if _is_stale_empty_draft(cr, wiki_space):
+		# In Review / Approved rows are always resumed as-is — they already passed
+		# submission, so the "stale and empty" check (which exists to auto-archive a
+		# Draft nobody touched) doesn't apply and must never archive them.
+		if cr.status in ("Draft", "Changes Requested") and _is_stale_empty_draft(cr, wiki_space):
 			_archive_stale_draft(cr)
 		else:
 			return cr.as_dict()
@@ -544,19 +547,35 @@ def get_or_create_draft_change_request(wiki_space: str, title: str | None = None
 
 
 def _find_existing_draft(wiki_space: str) -> Document | None:
-	"""Find user's most relevant draft: prefer one with actual changes."""
+	"""Find user's most relevant in-flight change request.
+
+	Includes CRs stuck in In Review/Approved, not just Draft/Changes Requested —
+	otherwise a save whose last step (merge) drops mid-flow (network blip, timeout,
+	tab closed) leaves the CR orphaned: invisible to this lookup, so the next save
+	silently starts a brand new Draft instead of resuming the one already in flight.
+	An in-flight CR always takes priority over a Draft/Changes Requested one, since
+	resuming it is what finishes the interrupted save.
+	"""
 	existing = frappe.get_all(
 		"Wiki Change Request",
 		filters={
 			"wiki_space": wiki_space,
-			"status": ("in", ["Draft", "Changes Requested"]),
+			"status": ("in", ["Draft", "Changes Requested", "In Review", "Approved"]),
 			"owner": frappe.session.user,
 		},
-		fields=["name", "base_revision", "head_revision", "modified"],
+		fields=["name", "status", "base_revision", "head_revision", "modified"],
 		order_by="modified desc",
 	)
 	if not existing:
 		return None
+
+	in_flight = next(
+		(row for row in existing if row["status"] in ("In Review", "Approved")), None
+	)
+	if in_flight:
+		cr = frappe.get_doc("Wiki Change Request", in_flight["name"])
+		cr.check_permission("read")
+		return cr
 
 	selected = None
 	for row in existing:
